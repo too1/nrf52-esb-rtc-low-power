@@ -59,18 +59,25 @@ static nrf_esb_payload_t        tx_payload = NRF_ESB_CREATE_PAYLOAD(0, 0x01, 0x0
 
 static nrf_esb_payload_t        rx_payload;
 
+volatile uint32_t   tx_packets_loaded = 0;
+volatile bool       tx_send_packet = false;
+
 void nrf_esb_event_handler(nrf_esb_evt_t const * p_event)
 {
     switch (p_event->evt_id)
     {
         case NRF_ESB_EVENT_TX_SUCCESS:
             NRF_LOG_DEBUG("TX SUCCESS EVENT");
+            tx_packets_loaded--;
             break;
+
         case NRF_ESB_EVENT_TX_FAILED:
             NRF_LOG_DEBUG("TX FAILED EVENT");
             (void) nrf_esb_flush_tx();
+            tx_packets_loaded = 0;
             (void) nrf_esb_start_tx();
             break;
+
         case NRF_ESB_EVENT_RX_RECEIVED:
             NRF_LOG_DEBUG("RX RECEIVED EVENT");
             while (nrf_esb_read_rx_payload(&rx_payload) == NRF_SUCCESS)
@@ -85,21 +92,26 @@ void nrf_esb_event_handler(nrf_esb_evt_t const * p_event)
 }
 
 
-void clocks_start( void )
+void hfclock_start(void)
 {
-    NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
-    NRF_CLOCK->TASKS_HFCLKSTART = 1;
-
-    while (NRF_CLOCK->EVENTS_HFCLKSTARTED == 0);
+    if((NRF_CLOCK->HFCLKSTAT & CLOCK_HFCLKSTAT_STATE_Msk) != (CLOCK_HFCLKSTAT_STATE_Running << CLOCK_HFCLKSTAT_STATE_Pos)) 
+    {
+        NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
+        NRF_CLOCK->TASKS_HFCLKSTART = 1;
+        while (NRF_CLOCK->EVENTS_HFCLKSTARTED == 0);
+    }
 }
 
+void hfclock_stop(void)
+{
+    NRF_CLOCK->TASKS_HFCLKSTOP = 1;
+}
 
 void gpio_init( void )
 {
     nrf_gpio_range_cfg_output(8, 15);
     bsp_board_init(BSP_INIT_LEDS);
 }
-
 
 uint32_t esb_init( void )
 {
@@ -132,10 +144,48 @@ uint32_t esb_init( void )
     return err_code;
 }
 
+#define RTC_RELOAD_MS   2000
+
+static void rtc_init(void)
+{
+    // Start the LF clock
+    NRF_CLOCK->TASKS_LFCLKSTART = 1;
+
+    // Configure the RTC to fire off an interrupt at regular intervals
+    NRF_RTC0->PRESCALER = 0;
+    NRF_RTC0->CC[0] = RTC_RELOAD_MS * 32768 / 1000;
+    NRF_RTC0->EVTENSET = RTC_EVTENSET_COMPARE0_Msk;
+    NRF_RTC0->INTENSET = RTC_INTENSET_COMPARE0_Msk;
+    NVIC_SetPriority(RTC0_IRQn, 7);
+    NVIC_EnableIRQ(RTC0_IRQn);
+    NRF_RTC0->TASKS_START = 1;
+}
+
+static void send_packet(uint8_t *data_ptr, uint32_t length)
+{
+    static nrf_esb_payload_t esb_payload;
+    esb_payload.noack = 0;
+    esb_payload.pipe = 0;
+    memcpy(esb_payload.data, data_ptr, length);
+    esb_payload.length = length;
+    nrf_esb_write_payload(&esb_payload);
+    tx_packets_loaded++;
+}
+
+static void powerdown(void)
+{
+    __WFE();
+    __SEV();
+    __WFE();
+}
+
+volatile bool hfclk_disabled = false;
 
 int main(void)
 {
     ret_code_t err_code;
+
+    NRF_POWER->DCDCEN = 1;
 
     gpio_init();
 
@@ -144,32 +194,43 @@ int main(void)
 
     NRF_LOG_DEFAULT_BACKENDS_INIT();
 
-    clocks_start();
+    hfclock_start();
+
+    rtc_init();
 
     err_code = esb_init();
     APP_ERROR_CHECK(err_code);
 
     NRF_LOG_DEBUG("Enhanced ShockBurst Transmitter Example started.");
+    
+    uint8_t esb_packet[4] = {0};
 
     while (true)
     {
-        NRF_LOG_DEBUG("Transmitting packet %02x", tx_payload.data[1]);
-
-        tx_payload.noack = false;
-        if (nrf_esb_write_payload(&tx_payload) == NRF_SUCCESS)
+        if(tx_send_packet)
         {
-            // Toggle one of the LEDs.
-            nrf_gpio_pin_write(LED_1, !(tx_payload.data[1]%8>0 && tx_payload.data[1]%8<=4));
-            nrf_gpio_pin_write(LED_2, !(tx_payload.data[1]%8>1 && tx_payload.data[1]%8<=5));
-            nrf_gpio_pin_write(LED_3, !(tx_payload.data[1]%8>2 && tx_payload.data[1]%8<=6));
-            nrf_gpio_pin_write(LED_4, !(tx_payload.data[1]%8>3));
-            tx_payload.data[1]++;
-        }
-        else
-        {
-            NRF_LOG_WARNING("Sending packet failed");
+            hfclock_start();
+            tx_send_packet = false;
+            esb_packet[1]++;
+            send_packet(esb_packet, 4);
         }
 
-        nrf_delay_us(50000);
+        if(tx_packets_loaded == 0)
+        {
+            // If the buffers are empty, disable the HF clock to save power
+            hfclock_stop();
+        }
+
+        powerdown();
+    }
+}
+
+void RTC0_IRQHandler(void)
+{
+    if(NRF_RTC0->EVENTS_COMPARE[0])
+    {
+        NRF_RTC0->EVENTS_COMPARE[0] = 0;
+        NRF_RTC0->TASKS_CLEAR = 1;
+        tx_send_packet = true;
     }
 }

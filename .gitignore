@@ -26,5 +26,6 @@
 **/_viminfo
 **/_vimtags
 **/Output/*
+*.jlink
 _build/
 RTE/
