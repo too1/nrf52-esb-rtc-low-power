@@ -94,7 +94,7 @@ void nrf_esb_event_handler(nrf_esb_evt_t const * p_event)
 
 void hfclock_start(void)
 {
-    if((NRF_CLOCK->HFCLKSTAT & CLOCK_HFCLKSTAT_STATE_Msk) != (CLOCK_HFCLKSTAT_STATE_Running << CLOCK_HFCLKSTAT_STATE_Pos)) 
+    if((NRF_CLOCK->HFCLKSTAT & CLOCK_HFCLKSTAT_SRC_Msk) != (CLOCK_HFCLKSTAT_SRC_Xtal << CLOCK_HFCLKSTAT_SRC_Pos)) 
     {
         NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
         NRF_CLOCK->TASKS_HFCLKSTART = 1;
